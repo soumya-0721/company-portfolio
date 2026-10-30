@@ -1,0 +1,9 @@
+node_modules/
+.env
+.refact/
+data/*.jsonl
+data/*.csv
+data/*.log
+*.log
+.DS_Store
+Thumbs.db

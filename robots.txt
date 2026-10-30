@@ -1,0 +1,8 @@
+User-agent: *
+Allow: /
+
+Disallow: /api/
+Disallow: /data/
+Disallow: /scripts/
+
+Sitemap: https://profile.next360.in/sitemap.xml

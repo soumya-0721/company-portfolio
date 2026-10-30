@@ -1,0 +1,16 @@
+{
+  "name": "next360-corporate-portfolio",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Corporate portfolio and enquiry platform for NEXT360 Organic Products Pvt. Ltd.",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node server.js",
+    "export:leads": "node scripts/export-leads.js"
+  },
+  "engines": {
+    "node": ">=18.17"
+  },
+  "license": "UNLICENSED"
+}
