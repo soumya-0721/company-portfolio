@@ -1,5 +1,7 @@
 node_modules/
 .env
+.env.local
+.env.*.local
 .refact/
 data/*.jsonl
 data/*.csv

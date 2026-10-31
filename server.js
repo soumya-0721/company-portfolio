@@ -1,28 +1,25 @@
 "use strict";
 
 const http = require("http");
-const fs = require("fs");
 const fsp = require("fs/promises");
 const path = require("path");
 const zlib = require("zlib");
 const crypto = require("crypto");
 const net = require("net");
 const tls = require("tls");
+const leadStore = require("./lib/lead-store");
 
 const ROOT = __dirname;
-const DATA_DIR = path.join(ROOT, "data");
-const LEADS_FILE = path.join(DATA_DIR, "leads.jsonl");
 const PORT = Number(process.env.PORT || 3000);
 const HOST = process.env.HOST || "0.0.0.0";
 const MAX_BODY_BYTES = 64 * 1024;
 const RATE_WINDOW_MS = 10 * 60 * 1000;
 const RATE_MAX = 5;
+const DUPLICATE_WINDOW_MS = 5 * 60 * 1000;
 const DEFAULT_NOTIFICATION_EMAIL = "office@next360.in";
 
-loadEnvFile(path.join(ROOT, ".env"));
-
 const IP_SALT = process.env.IP_HASH_SALT || crypto.randomBytes(24).toString("hex");
-const TRUST_PROXY = process.env.TRUST_PROXY === "1";
+const TRUST_PROXY = process.env.TRUST_PROXY === "1" || process.env.VERCEL === "1";
 
 const MIME_TYPES = {
   ".html": "text/html; charset=utf-8",
@@ -65,8 +62,17 @@ const BLOCKED_FILES = new Set([
   "/server.js",
   "/package.json",
   "/package-lock.json",
+  "/vercel.json",
   "/.env",
   "/.env.example"
+]);
+
+const BLOCKED_EXTENSIONS = new Set([
+  ".csv",
+  ".jsonl",
+  ".xlsx",
+  ".xls",
+  ".log"
 ]);
 
 const FORM_TYPES = new Set(["general", "organic", "it", "partnership"]);
@@ -92,6 +98,7 @@ const ALLOWED_FIELDS = new Set([
 ]);
 
 const rateBuckets = new Map();
+const recentEnquiries = new Map();
 
 const server = http.createServer(async (req, res) => {
   try {
@@ -147,9 +154,17 @@ const server = http.createServer(async (req, res) => {
   }
 });
 
+server.requestTimeout = 15000;
+server.headersTimeout = 10000;
+
 server.listen(PORT, HOST, () => {
   console.log(`NEXT360 site running at http://localhost:${PORT}`);
-  console.log(`Lead storage: ${LEADS_FILE}`);
+  console.log(`Lead storage: ${leadStore.storageDescription()}`);
+  if (process.env.VERCEL === "1" && !leadStore.getRedisConfig()) {
+    console.warn(
+      "Vercel detected without Redis. Local file storage is not persistent on serverless hosting."
+    );
+  }
   if (!process.env.IP_HASH_SALT) {
     console.warn("IP_HASH_SALT is not set. A random salt will be used for this process only.");
   }
@@ -234,6 +249,17 @@ async function handleEnquiry(req, res) {
     });
   }
 
+  const fingerprint = enquiryFingerprint(fields, formType);
+  const duplicate = findDuplicate(fingerprint);
+  if (duplicate) {
+    return sendJson(res, 200, {
+      ok: true,
+      id: duplicate.id,
+      duplicate: true,
+      message: "This enquiry was already received. Our team will review it shortly."
+    });
+  }
+
   const entry = {
     id: crypto.randomUUID(),
     receivedAt: new Date().toISOString(),
@@ -245,8 +271,8 @@ async function handleEnquiry(req, res) {
   };
 
   try {
-    await fsp.mkdir(DATA_DIR, { recursive: true });
-    await fsp.appendFile(LEADS_FILE, `${JSON.stringify(entry)}\n`, { encoding: "utf8", mode: 0o600 });
+    await leadStore.appendLead(entry);
+    rememberEnquiry(fingerprint, entry.id);
   } catch (error) {
     console.error("Could not save enquiry:", error);
     return sendJson(res, 500, {
@@ -278,8 +304,6 @@ function sanitizeFields(payload) {
     if (typeof value === "string") {
       const cleaned = truncate(cleanString(value), key === "message" ? 6000 : 500);
       if (cleaned !== "") fields[key] = cleaned;
-    } else if (typeof value === "number" || typeof value === "boolean") {
-      fields[key] = value;
     }
   }
   fields.consent = payload.consent === true || payload.consent === "true" || payload.consent === "on";
@@ -661,31 +685,75 @@ function checkRateLimit(ip) {
   return { allowed: true };
 }
 
+function enquiryFingerprint(fields, formType) {
+  const contact = `${(fields.email || "").toLowerCase()}|${(fields.phone || "").replace(/\D/g, "")}`;
+  const message = (fields.message || "").trim().toLowerCase();
+  return crypto.createHash("sha256").update(`${formType}|${contact}|${message}`).digest("hex");
+}
+
+function findDuplicate(fingerprint) {
+  const existing = recentEnquiries.get(fingerprint);
+  if (!existing) return null;
+  if (Date.now() - existing.createdAt > DUPLICATE_WINDOW_MS) {
+    recentEnquiries.delete(fingerprint);
+    return null;
+  }
+  return existing;
+}
+
+function rememberEnquiry(fingerprint, id) {
+  recentEnquiries.set(fingerprint, { id, createdAt: Date.now() });
+}
+
 setInterval(() => {
-  const cutoff = Date.now() - RATE_WINDOW_MS;
+  const rateCutoff = Date.now() - RATE_WINDOW_MS;
   for (const [ip, bucket] of rateBuckets) {
-    if (bucket.start < cutoff) rateBuckets.delete(ip);
+    if (bucket.start < rateCutoff) rateBuckets.delete(ip);
+  }
+
+  const duplicateCutoff = Date.now() - DUPLICATE_WINDOW_MS;
+  for (const [fingerprint, item] of recentEnquiries) {
+    if (item.createdAt < duplicateCutoff) recentEnquiries.delete(fingerprint);
   }
 }, RATE_WINDOW_MS).unref();
 
 function readBody(req, maxBytes) {
   return new Promise((resolve, reject) => {
+    if (req.body !== undefined) {
+      const raw = Buffer.isBuffer(req.body)
+        ? req.body.toString("utf8")
+        : typeof req.body === "string"
+          ? req.body
+          : JSON.stringify(req.body);
+
+      if (Buffer.byteLength(raw) > maxBytes) {
+        const error = new Error("Body too large");
+        error.code = "BODY_TOO_LARGE";
+        return reject(error);
+      }
+      return resolve(raw);
+    }
+
     let total = 0;
+    let tooLarge = false;
     const chunks = [];
 
     req.on("data", (chunk) => {
+      if (tooLarge) return;
       total += chunk.length;
       if (total > maxBytes) {
+        tooLarge = true;
         const error = new Error("Body too large");
         error.code = "BODY_TOO_LARGE";
         reject(error);
-        req.destroy();
         return;
       }
       chunks.push(chunk);
     });
 
-    req.on("end", () => resolve(Buffer.concat(chunks).toString("utf8")));
+    req.on("end", () => {
+      if (!tooLarge) resolve(Buffer.concat(chunks).toString("utf8"));
+    });
     req.on("error", reject);
   });
 }
@@ -884,6 +952,7 @@ function isBlockedPath(pathname) {
   const normalized = pathname.replace(/\\/g, "/");
   if (BLOCKED_FILES.has(normalized)) return true;
   if (BLOCKED_PREFIXES.some((prefix) => normalized.startsWith(prefix))) return true;
+  if (BLOCKED_EXTENSIONS.has(path.extname(normalized).toLowerCase())) return true;
   return normalized
     .split("/")
     .filter(Boolean)
@@ -900,7 +969,7 @@ function clientIp(req) {
     const forwarded = String(req.headers["x-forwarded-for"] || "").split(",")[0].trim();
     if (forwarded) return forwarded;
   }
-  return req.socket.remoteAddress || "unknown";
+  return (req.socket && req.socket.remoteAddress) || "unknown";
 }
 
 function hashIp(ip) {
@@ -916,31 +985,4 @@ function cleanString(value) {
 
 function truncate(value, maxLength) {
   return value.length > maxLength ? value.slice(0, maxLength) : value;
-}
-
-function loadEnvFile(filePath) {
-  let contents;
-  try {
-    contents = fs.readFileSync(filePath, "utf8");
-  } catch (error) {
-    return;
-  }
-
-  for (const line of contents.split(/\r?\n/)) {
-    const trimmed = line.trim();
-    if (!trimmed || trimmed.startsWith("#")) continue;
-    const separator = trimmed.indexOf("=");
-    if (separator === -1) continue;
-    const key = trimmed.slice(0, separator).trim();
-    let value = trimmed.slice(separator + 1).trim();
-    if (
-      (value.startsWith('"') && value.endsWith('"')) ||
-      (value.startsWith("'") && value.endsWith("'"))
-    ) {
-      value = value.slice(1, -1);
-    }
-    if (key && process.env[key] === undefined) {
-      process.env[key] = value;
-    }
-  }
 }

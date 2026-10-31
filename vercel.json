@@ -1,0 +1,30 @@
+{
+  "version": 2,
+  "builds": [
+    {
+      "src": "server.js",
+      "use": "@vercel/node",
+      "config": {
+        "includeFiles": [
+          "assets/**",
+          "index.html",
+          "about.html",
+          "organic.html",
+          "it-services.html",
+          "projects.html",
+          "partnerships.html",
+          "contact.html",
+          "404.html",
+          "robots.txt",
+          "sitemap.xml"
+        ]
+      }
+    }
+  ],
+  "routes": [
+    {
+      "src": "/(.*)",
+      "dest": "server.js"
+    }
+  ]
+}

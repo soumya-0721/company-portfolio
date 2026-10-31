@@ -2,9 +2,8 @@
 
 const fs = require("fs");
 const path = require("path");
+const leadStore = require("../lib/lead-store");
 
-const ROOT = path.resolve(__dirname, "..");
-const LEADS_FILE = path.join(ROOT, "data", "leads.jsonl");
 const COLUMNS = [
   "id",
   "receivedAt",
@@ -31,24 +30,25 @@ const COLUMNS = [
   "userAgent"
 ];
 
-function main() {
-  if (!fs.existsSync(LEADS_FILE)) {
-    console.error(`No leads file found at ${LEADS_FILE}`);
+async function main() {
+  const outputArg = process.argv[2];
+  const outputFile = outputArg ? path.resolve(process.cwd(), outputArg) : null;
+
+  if (outputFile && isInsideProject(outputFile)) {
+    console.error(
+      "Refusing to write an enquiry export inside the website directory. Choose a private location outside the project."
+    );
     process.exitCode = 1;
     return;
   }
 
-  const outputArg = process.argv[2];
-  const outputFile = outputArg ? path.resolve(process.cwd(), outputArg) : null;
-  const lines = fs.readFileSync(LEADS_FILE, "utf8").split(/\r?\n/).filter(Boolean);
-  const rows = [];
-
-  for (const line of lines) {
-    try {
-      rows.push(JSON.parse(line));
-    } catch (error) {
-      console.error(`Skipping invalid JSON line: ${error.message}`);
-    }
+  let rows;
+  try {
+    rows = await leadStore.readStoredLeads();
+  } catch (error) {
+    console.error(`Could not read stored enquiries: ${error.message}`);
+    process.exitCode = 1;
+    return;
   }
 
   const csv = [
@@ -57,11 +57,18 @@ function main() {
   ].join("\r\n");
 
   if (outputFile) {
-    fs.writeFileSync(outputFile, `\uFEFF${csv}\r\n`, "utf8");
+    fs.mkdirSync(path.dirname(outputFile), { recursive: true, mode: 0o700 });
+    fs.writeFileSync(outputFile, `\uFEFF${csv}\r\n`, { encoding: "utf8", mode: 0o600 });
+    fs.chmodSync(outputFile, 0o600);
     console.log(`Exported ${rows.length} enquiries to ${outputFile}`);
   } else {
     process.stdout.write(`${csv}\r\n`);
   }
+}
+
+function isInsideProject(filePath) {
+  const relative = path.relative(leadStore.ROOT, filePath);
+  return relative !== "" && !relative.startsWith("..") && !path.isAbsolute(relative);
 }
 
 function valueFor(row, column) {
@@ -81,7 +88,10 @@ function valueFor(row, column) {
 }
 
 function csvCell(value) {
-  const text = String(value ?? "");
+  let text = String(value ?? "");
+  if (/^[=+\-@\t\r]/.test(text)) {
+    text = `'${text}`;
+  }
   if (/[",\r\n]/.test(text)) {
     return `"${text.replace(/"/g, '""')}"`;
   }
