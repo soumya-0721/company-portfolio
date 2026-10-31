@@ -6,6 +6,8 @@ const fsp = require("fs/promises");
 const path = require("path");
 const zlib = require("zlib");
 const crypto = require("crypto");
+const net = require("net");
+const tls = require("tls");
 
 const ROOT = __dirname;
 const DATA_DIR = path.join(ROOT, "data");
@@ -15,6 +17,7 @@ const HOST = process.env.HOST || "0.0.0.0";
 const MAX_BODY_BYTES = 64 * 1024;
 const RATE_WINDOW_MS = 10 * 60 * 1000;
 const RATE_MAX = 5;
+const DEFAULT_NOTIFICATION_EMAIL = "office@next360.in";
 
 loadEnvFile(path.join(ROOT, ".env"));
 
@@ -151,7 +154,14 @@ server.listen(PORT, HOST, () => {
     console.warn("IP_HASH_SALT is not set. A random salt will be used for this process only.");
   }
   if (!process.env.ENQUIRY_WEBHOOK_URL) {
-    console.log("No ENQUIRY_WEBHOOK_URL configured. Enquiries will be stored locally only.");
+    console.log("No ENQUIRY_WEBHOOK_URL configured.");
+  }
+  if (process.env.SMTP_HOST) {
+    console.log(
+      `Enquiry email notifications: ${process.env.ENQUIRY_NOTIFICATION_EMAIL || DEFAULT_NOTIFICATION_EMAIL}`
+    );
+  } else {
+    console.log("No SMTP_HOST configured. Enquiry email notifications are disabled.");
   }
 });
 
@@ -244,6 +254,10 @@ async function handleEnquiry(req, res) {
       error: "Your enquiry could not be saved. Please try again or contact us directly."
     });
   }
+
+  notifyEmail(entry).catch((error) => {
+    console.error("Enquiry email notification failed:", error.message);
+  });
 
   notifyWebhook(entry).catch((error) => {
     console.error("Enquiry webhook failed:", error.message);
@@ -369,6 +383,261 @@ async function notifyWebhook(entry) {
   } finally {
     clearTimeout(timeout);
   }
+}
+
+/* --------------------------------------------------------------------------
+   Internal email notification (optional SMTP, zero dependencies)
+   -------------------------------------------------------------------------- */
+
+async function notifyEmail(entry) {
+  const host = process.env.SMTP_HOST;
+  if (!host) return;
+
+  const port = Number(process.env.SMTP_PORT || 587);
+  const secure = /^(1|true|yes)$/i.test(process.env.SMTP_SECURE || "") || port === 465;
+  const user = process.env.SMTP_USER || "";
+  const pass = process.env.SMTP_PASS || "";
+  const from = process.env.SMTP_FROM || user || DEFAULT_NOTIFICATION_EMAIL;
+  const to = process.env.ENQUIRY_NOTIFICATION_EMAIL || DEFAULT_NOTIFICATION_EMAIL;
+
+  await sendSmtpMail({
+    host,
+    port,
+    secure,
+    user,
+    pass,
+    from,
+    to,
+    replyTo: entry.fields.email || "",
+    subject: `New ${entry.formType} enquiry from ${entry.fields.name}`,
+    body: formatEnquiryEmail(entry)
+  });
+}
+
+function formatEnquiryEmail(entry) {
+  const labels = {
+    name: "Name",
+    email: "Email",
+    phone: "Phone",
+    company: "Company",
+    role: "Role",
+    location: "Location",
+    website: "Website",
+    service: "Service",
+    budget: "Budget",
+    timeline: "Timeline",
+    category: "Category",
+    product: "Product",
+    quantity: "Quantity",
+    enquiry_type: "Enquiry type",
+    partnership_type: "Partnership type"
+  };
+
+  const lines = [
+    "A new enquiry was submitted on the NEXT360 website.",
+    "",
+    `Reference: ${entry.id}`,
+    `Received: ${entry.receivedAt}`,
+    `Form type: ${entry.formType}`,
+    `Page: ${entry.fields.page || "Not provided"}`,
+    "",
+    "Customer details"
+  ];
+
+  for (const [key, label] of Object.entries(labels)) {
+    if (entry.fields[key]) lines.push(`${label}: ${entry.fields[key]}`);
+  }
+
+  lines.push("", "Message", entry.fields.message || "(No message provided)");
+  lines.push("", `Consent to be contacted: ${entry.fields.consent ? "Yes" : "No"}`);
+
+  const utm = Object.entries(entry.utm || {})
+    .map(([key, value]) => `${key}=${value}`)
+    .join(", ");
+  if (utm) lines.push(`Campaign: ${utm}`);
+
+  return lines.join("\n");
+}
+
+function sendSmtpMail(options) {
+  return new Promise((resolve, reject) => {
+    let socket = options.secure
+      ? tls.connect({ host: options.host, port: options.port, servername: options.host })
+      : net.connect({ host: options.host, port: options.port });
+    let read = createLineReader(socket);
+    let settled = false;
+    const timer = setTimeout(() => finish(new Error("SMTP connection timed out.")), 20000);
+
+    function finish(error) {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      socket.destroy();
+      if (error) reject(error);
+      else resolve();
+    }
+
+    function watch(target) {
+      target.on("error", finish);
+      target.on("close", () => {
+        if (!settled) finish(new Error("SMTP connection closed unexpectedly."));
+      });
+    }
+
+    watch(socket);
+
+    async function smtpCommand(line, expected) {
+      socket.write(`${line}\r\n`);
+      const response = await readResponse(read);
+      assertSmtpCode(response, expected);
+      return response;
+    }
+
+    (async () => {
+      await waitForConnection(socket, options.secure);
+      let response = await readResponse(read);
+      assertSmtpCode(response, [220]);
+
+      const greeting = await smtpCommand("EHLO next360.in", [250]);
+      const supportsStartTls = /\bSTARTTLS\b/i.test(greeting.lines.join(" "));
+
+      if (!options.secure && supportsStartTls) {
+        await smtpCommand("STARTTLS", [220]);
+        socket.removeAllListeners("data");
+        socket.removeAllListeners("error");
+        socket.removeAllListeners("close");
+        socket = tls.connect({ socket, servername: options.host });
+        watch(socket);
+        read = createLineReader(socket);
+        await waitForConnection(socket, true);
+        await smtpCommand("EHLO next360.in", [250]);
+      }
+
+      if (options.user) {
+        await smtpCommand("AUTH LOGIN", [334]);
+        await smtpCommand(Buffer.from(options.user, "utf8").toString("base64"), [334]);
+        await smtpCommand(Buffer.from(options.pass || "", "utf8").toString("base64"), [235]);
+      }
+
+      await smtpCommand(`MAIL FROM:<${extractAddress(options.from)}>`, [250]);
+      await smtpCommand(`RCPT TO:<${extractAddress(options.to)}>`, [250, 251]);
+      await smtpCommand("DATA", [354]);
+
+      socket.write(`${buildSmtpMessage(options)}\r\n.\r\n`);
+      response = await readResponse(read);
+      assertSmtpCode(response, [250]);
+
+      socket.write("QUIT\r\n");
+      await readResponse(read).catch(() => null);
+      finish();
+    })().catch(finish);
+  });
+}
+
+function waitForConnection(socket, secure) {
+  const readyEvent = secure ? "secureConnect" : "connect";
+  if (!secure && !socket.connecting) return Promise.resolve();
+
+  return new Promise((resolve, reject) => {
+    const onReady = () => {
+      cleanup();
+      resolve();
+    };
+    const onError = (error) => {
+      cleanup();
+      reject(error);
+    };
+    const cleanup = () => {
+      socket.removeListener(readyEvent, onReady);
+      socket.removeListener("error", onError);
+    };
+
+    socket.once(readyEvent, onReady);
+    socket.once("error", onError);
+  });
+}
+
+function createLineReader(socket) {
+  let buffer = "";
+  const queue = [];
+  let waiter = null;
+
+  socket.on("data", (chunk) => {
+    buffer += Buffer.isBuffer(chunk) ? chunk.toString("utf8") : String(chunk);
+    let index;
+    while ((index = buffer.indexOf("\r\n")) !== -1) {
+      const line = buffer.slice(0, index);
+      buffer = buffer.slice(index + 2);
+      if (waiter) {
+        const resolveLine = waiter;
+        waiter = null;
+        resolveLine(line);
+      } else {
+        queue.push(line);
+      }
+    }
+  });
+
+  return function readLine() {
+    if (queue.length > 0) return Promise.resolve(queue.shift());
+    return new Promise((resolve) => {
+      waiter = resolve;
+    });
+  };
+}
+
+async function readResponse(readLine) {
+  const lines = [];
+
+  for (;;) {
+    const line = await readLine();
+    lines.push(line);
+    if (line.length < 4 || line[3] !== "-") break;
+  }
+
+  return {
+    code: Number(lines[lines.length - 1].slice(0, 3)),
+    lines
+  };
+}
+
+function assertSmtpCode(response, expected) {
+  if (!expected.includes(response.code)) {
+    throw new Error(`SMTP error ${response.code}: ${response.lines.join(" ")}`);
+  }
+}
+
+function buildSmtpMessage({ from, to, replyTo, subject, body }) {
+  const headers = [
+    `From: NEXT360 Website <${extractAddress(from)}>`,
+    `To: ${to}`,
+    `Subject: ${encodeMailHeader(subject)}`,
+    `Date: ${new Date().toUTCString()}`,
+    "MIME-Version: 1.0",
+    "Content-Type: text/plain; charset=utf-8",
+    "Content-Transfer-Encoding: 8bit"
+  ];
+
+  if (replyTo) headers.push(`Reply-To: ${replyTo}`);
+
+  const message = `${headers.join("\r\n")}\r\n\r\n${body.replace(/\r?\n/g, "\r\n")}`;
+
+  return message
+    .split("\r\n")
+    .map((line) => (line.startsWith(".") ? `.${line}` : line))
+    .join("\r\n");
+}
+
+function extractAddress(value) {
+  const match = String(value || "").match(/<([^>]+)>/);
+  return (match ? match[1] : String(value || "")).trim();
+}
+
+function encodeMailHeader(value) {
+  const text = String(value || "");
+  return /^[\x20-\x7E]*$/.test(text)
+    ? text
+    : `=?UTF-8?B?${Buffer.from(text, "utf8").toString("base64")}?=`;
 }
 
 function checkRateLimit(ip) {

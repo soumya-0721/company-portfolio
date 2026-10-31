@@ -253,11 +253,16 @@
   });
 
   var whatsappNumber = hasValue(contact.whatsapp) ? contact.whatsapp.replace(/[^\d]/g, "") : "";
+  var whatsappUrl = hasValue(contact.whatsappUrl)
+    ? contact.whatsappUrl.trim().replace(/\/+$/, "")
+    : whatsappNumber
+      ? "https://wa.me/" + whatsappNumber
+      : "";
 
-  if (whatsappNumber) {
+  if (whatsappUrl) {
     $$("[data-whatsapp]").forEach(function (el) {
       var message = encodeURIComponent("Hello NEXT360, I would like to make an enquiry.");
-      el.href = "https://wa.me/" + whatsappNumber + "?text=" + message;
+      el.href = whatsappUrl + "?text=" + message;
       el.target = "_blank";
       el.rel = "noopener noreferrer";
       el.hidden = false;

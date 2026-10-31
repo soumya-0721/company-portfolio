@@ -41,8 +41,13 @@ All public contact details and links live in `assets/js/config.js`:
 contact.email
 contact.phone
 contact.whatsapp
+contact.whatsappUrl
 contact.addressLine
 contact.mapEmbedUrl
+links.officialWebsite
+links.companyProfile
+links.ceoPortfolio
+links.ceoLinkedIn
 links.marketplace
 links.social.linkedin
 links.social.instagram
@@ -51,9 +56,13 @@ links.social.youtube
 analytics.gaMeasurementId
 ```
 
+The official values are configured: `office@next360.in`, `+91 9989163332`,
+`https://wa.me/919989163332`, `https://next360.in` for the Official Company
+Profile and `https://samhithreddysangam.next360.in/` for the CEO Portfolio.
+
 Empty values are handled deliberately:
 
-- Email, phone and address show **To be confirmed**.
+- Missing contact fields show **To be confirmed**.
 - WhatsApp buttons stay hidden until a number is supplied.
 - Marketplace links stay hidden until a URL is supplied.
 - Social links stay hidden until URLs are supplied.
@@ -77,7 +86,32 @@ Forms post JSON to `/api/enquiry`. The server:
 - Rate-limits each connection to 5 enquiries per 10 minutes.
 - Stores accepted enquiries in `data/leads.jsonl`.
 - Stores an anonymised IP hash, not the raw IP address.
+- Sends an internal email notification to `office@next360.in` when SMTP is configured.
 - Optionally forwards each enquiry to `ENQUIRY_WEBHOOK_URL`.
+
+### Email notifications
+
+The server includes a zero-dependency SMTP client. Configure these values in
+`.env` to deliver every new enquiry to the internal inbox:
+
+```bash
+ENQUIRY_NOTIFICATION_EMAIL=office@next360.in
+SMTP_HOST=smtp.example.com
+SMTP_PORT=587
+SMTP_SECURE=0
+SMTP_USER=office@next360.in
+SMTP_PASS=replace-with-mail-password
+SMTP_FROM=office@next360.in
+```
+
+Use `SMTP_SECURE=1` for an implicit TLS port such as 465. When `SMTP_HOST` is
+empty, email notifications are logged as disabled and enquiries are still
+stored locally. SMTP failures never discard a stored enquiry.
+
+This project does not include an admin dashboard. Review stored enquiries with
+`npm run export:leads` or read `data/leads.jsonl` directly. Automated WhatsApp
+notifications are not sent; WhatsApp links open a normal chat with the number
+configured in `assets/js/config.js`.
 
 Accepted enquiries are appended as one JSON object per line. The data directory and lead file are excluded from Git.
 
@@ -124,7 +158,7 @@ The export includes a UTF-8 BOM so it opens correctly in Excel. Treat exported f
 
 1. Copy the project files to the server. Do not copy `.env` into a public repository.
 2. Install Node.js 18.17 or newer.
-3. Create `.env` from `.env.example` and set a strong `IP_HASH_SALT`.
+3. Create `.env` from `.env.example`, set a strong `IP_HASH_SALT` and add the SMTP credentials for `office@next360.in` when email notifications are required.
 4. Run `npm start`.
 5. Put the Node process behind a reverse proxy such as Nginx or Caddy for HTTPS.
 6. Set `TRUST_PROXY=1` only when a trusted proxy forwards client IPs.
@@ -140,16 +174,17 @@ Add a GA4 measurement ID in `assets/js/config.js`. The site does not load Google
 ## Before launch checklist
 
 - [ ] Replace the placeholder logo and favicon with approved brand assets.
-- [ ] Add the confirmed email, phone, WhatsApp number and office address.
-- [ ] Add the confirmed Google Maps embed URL.
-- [ ] Add the approved marketplace URL.
+- [x] Add the confirmed email and WhatsApp number.
+- [ ] Add the confirmed office address and Google Maps embed URL.
+- [x] Add the approved Official Company Profile and CEO Portfolio links.
+- [x] Add the approved marketplace URL.
 - [ ] Add approved social profile URLs.
 - [ ] Add the GA4 measurement ID if analytics is required.
 - [ ] Confirm the domain in canonical tags, Open Graph tags and `sitemap.xml`.
 - [ ] Review all product and service descriptions for accuracy.
 - [ ] Publish Ayurvena details and imagery only after approval.
-- [ ] Test every enquiry form and confirm `data/leads.jsonl` is created.
-- [ ] Configure a webhook or notification route so enquiries are seen promptly.
+- [x] Test every enquiry form and confirm `data/leads.jsonl` is created.
+- [ ] Configure SMTP credentials so enquiries reach `office@next360.in`.
 - [ ] Test across mobile, tablet and desktop.
 - [ ] Review privacy wording and consent language with the company.
 
