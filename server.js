@@ -114,7 +114,9 @@ const server = http.createServer(async (req, res) => {
       return sendJson(res, 200, {
         ok: true,
         service: "next360-site",
-        uptimeSeconds: Math.round(process.uptime())
+        uptimeSeconds: Math.round(process.uptime()),
+        persistentStorage: Boolean(leadStore.getRedisConfig()),
+        emailNotifications: Boolean(process.env.SMTP_HOST)
       });
     }
 

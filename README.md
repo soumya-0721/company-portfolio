@@ -223,7 +223,8 @@ return `404`.
 5. Redeploy so the new environment variables and `vercel.json` take effect.
 6. Check the deployment logs for `Lead storage: Redis (persistent)` and
    `Enquiry email notifications: office@next360.in`.
-7. Open `/api/health`, confirm `{"ok":true}`.
+7. Open `/api/health`, confirm `{"ok":true}`, `persistentStorage: true` and
+   `emailNotifications: true` once the environment variables are set.
 8. Confirm `/assets/css/styles.css` returns `200` with
    `Content-Type: text/css`.
 9. Submit a clearly labelled test enquiry. Confirm the `201` response, the
