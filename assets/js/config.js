@@ -8,7 +8,7 @@
  * NEXT360 already operates other platforms. The portfolio links out to them
  * instead of duplicating them:
  *   officialWebsite — the NEXT360 company website / organic marketplace
- *   companyProfile   — the Official Company Profile at next360.in
+ *   companyProfile   — the Official Company Profile at profile.next360.in
  *   ceoPortfolio     — the CEO's separate, personal portfolio
  *   ceoLinkedIn      — the CEO's LinkedIn profile
  */
@@ -29,7 +29,7 @@ window.NEXT360_CONFIG = {
 
   links: {
     officialWebsite: "https://next360.in",
-    companyProfile: "https://next360.in",
+    companyProfile: "https://profile.next360.in",
     ceoPortfolio: "https://samhithreddysangam.next360.in/",
     ceoLinkedIn: "https://in.linkedin.com/in/samhithreddysangam",
     marketplace: "https://next360.in",

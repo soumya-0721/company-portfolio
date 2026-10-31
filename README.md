@@ -57,8 +57,9 @@ analytics.gaMeasurementId
 ```
 
 The official values are configured: `office@next360.in`, `+91 9989163332`,
-`https://wa.me/919989163332`, `https://next360.in` for the Official Company
-Profile and `https://samhithreddysangam.next360.in/` for the CEO Portfolio.
+`https://wa.me/919989163332`, `https://next360.in` for the Official Website,
+`https://profile.next360.in` for the Official Company Profile and
+`https://samhithreddysangam.next360.in/` for the CEO Portfolio.
 
 Empty values are handled deliberately:
 
